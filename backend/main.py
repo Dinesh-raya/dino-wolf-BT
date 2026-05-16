@@ -1,9 +1,18 @@
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import socketio
 import asyncio
 import contextlib
+import os
+import logging
+from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
 
 from sockets.server import sio
 # Import sockets to register events
@@ -16,12 +25,42 @@ from persistence.db import init_db
 from persistence.repository import save_snapshot, load_snapshot
 from rooms.manager import room_manager
 from engine.turn_manager import turn_manager
+from engine.auction import auction_manager
 
 async def background_save_loop():
+    tick_count = 0
     while True:
         try:
-            await asyncio.sleep(10) # Save every 10 seconds
-            save_snapshot(room_manager.rooms, turn_manager.games, turn_manager.turn_states)
+            await asyncio.sleep(1)
+            tick_count += 1
+            for room_code in list(turn_manager.games.keys()):
+                turn = turn_manager.tick_turn_timer(room_code)
+                game = turn_manager.get_game(room_code)
+                if turn and game:
+                    await sio.emit(
+                        "game:state_update",
+                        {"game": game.model_dump(), "turn": turn.model_dump()},
+                        room=room_code,
+                    )
+
+                auction = auction_manager.tick(room_code)
+                if not auction:
+                    continue
+                if auction.time_remaining == 0 and auction.active:
+                    auction_manager.end_auction(room_code, game)
+                    await sio.emit("auction:end", {"message": "Auction ended by timer"}, room=room_code)
+                    if turn:
+                        turn.phase = "action"
+                    await sio.emit(
+                        "game:state_update",
+                        {"game": game.model_dump(), "turn": turn.model_dump() if turn else None},
+                        room=room_code,
+                    )
+                else:
+                    await sio.emit("auction:state_update", {"auction": auction.model_dump()}, room=room_code)
+
+            if tick_count % 10 == 0:
+                save_snapshot(room_manager.rooms, turn_manager.games, turn_manager.turn_states)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -55,7 +94,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="DINO-RICHUP: PAN-INDIA EDITION API", lifespan=lifespan)
 
 # Create ASGI application with socketio
-socket_app = socketio.ASGIApp(sio, app)
+# Mount Socket.IO at /socket.io path
+socket_app = socketio.ASGIApp(sio, other_asgi_app=None)
+app.mount("/socket.io", socket_app)
 
 # Endpoint for health check
 @app.get("/health")
@@ -70,11 +111,29 @@ if os.path.exists(frontend_dist):
     
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
-        # Fallback to index.html for client-side routing
-        potential_path = os.path.join(frontend_dist, full_path)
-        if os.path.exists(potential_path) and os.path.isfile(potential_path):
-            return FileResponse(potential_path)
+        # Skip Socket.IO paths - let socketio.ASGIApp handle them
+        print(f"SERVE_FRONTEND CALLED: full_path='{full_path}'")
+        if full_path.startswith("socket.io/"):
+            print(f"SKIPPING SOCKET.IO PATH")
+            raise HTTPException(status_code=404, detail="Not found")
+        
+        # Fallback to index.html for client-side routing, but keep strict directory containment.
+        normalized = os.path.realpath(os.path.join(frontend_dist, full_path))
+        root = os.path.realpath(frontend_dist)
+        if not normalized.startswith(root):
+            raise HTTPException(status_code=400, detail="Invalid asset path")
+        if os.path.exists(normalized) and os.path.isfile(normalized):
+            print(f"Serving file: {normalized}")
+            return FileResponse(normalized)
+        print(f"Falling back to index.html")
         return FileResponse(os.path.join(frontend_dist, "index.html"))
+else:
+    @app.get("/")
+    async def root_info():
+        return {
+            "status": "ok",
+            "message": "Backend is running. Start frontend dev server at http://localhost:5173 or build frontend for static serving.",
+        }
 
 # Note: For running locally with hot reload:
 # uvicorn main:socket_app --host 0.0.0.0 --port 8000 --reload

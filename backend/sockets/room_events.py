@@ -1,7 +1,11 @@
 import json
 import os
+from pydantic import ValidationError
 from sockets.server import sio
 from rooms.manager import room_manager
+from schemas.contracts import RoomCreatePayload, RoomJoinPayload, RoomUpdateSettingsPayload
+from services.session_manager import session_manager
+from services.rate_limiter import rate_limiter
 
 # Load socket events constants (handling path relative to backend root)
 events_path = os.path.join(os.path.dirname(__file__), '../../shared/events/socket_events.json')
@@ -12,31 +16,49 @@ ROOM_EVENTS = SOCKET_EVENTS["ROOM"]
 
 @sio.on('room:create')
 async def room_create(sid, data):
+    if not rate_limiter.allow(f"{sid}:room_create"):
+        return {"status": "error", "message": "Too many requests"}
     """
     Expects data: {"name": "PlayerName", "color": "blue"}
     """
-    player_name = data.get("name", f"Player_{sid[:4]}")
-    player_color = data.get("color", "cyan-400")
+    try:
+        payload = RoomCreatePayload.model_validate(data or {})
+    except ValidationError as exc:
+        return {"status": "error", "message": exc.errors()[0]["msg"]}
+    player_name = payload.name
+    player_color = payload.color
+    client_session = await sio.get_session(sid)
+    session_id = client_session.get("session_id")
+    reconnect_token = session_manager.rotate_reconnect_token(session_id)
     
     room_code = room_manager.create_room(
         host_id=sid,
         host_name=player_name,
-        host_color=player_color
+        host_color=player_color,
+        session_id=session_id,
+        reconnect_token=reconnect_token,
+        is_private=payload.is_private,
     )
     
     await sio.enter_room(sid, room_code)
     room = room_manager.get_room(room_code)
     
-    return {"status": "success", "room": room.model_dump()}
+    return {"status": "success", "room": room.model_dump(), "reconnectToken": reconnect_token}
 
 @sio.on('room:join')
 async def room_join(sid, data):
+    if not rate_limiter.allow(f"{sid}:room_join"):
+        return {"status": "error", "message": "Too many requests"}
     """
     Expects data: {"room_code": "ABCD", "name": "PlayerName", "color": "purple"}
     """
-    room_code = data.get("room_code", "").upper()
-    player_name = data.get("name", f"Player_{sid[:4]}")
-    player_color = data.get("color", "cyan-400")
+    try:
+        payload = RoomJoinPayload.model_validate(data or {})
+    except ValidationError as exc:
+        return {"status": "error", "message": exc.errors()[0]["msg"]}
+    room_code = payload.room_code.upper()
+    player_name = payload.name
+    player_color = payload.color
     
     room = room_manager.get_room(room_code)
     if not room:
@@ -45,10 +67,12 @@ async def room_join(sid, data):
     # Reconnect logic
     if room.status == "playing":
         for pid, player in list(room.players.items()):
-            if player.name == player_name and not player.connected:
+            reconnect_record = session_manager.consume_reconnect_token(payload.reconnect_token or "")
+            if reconnect_record and player.session_id == reconnect_record.session_id and not player.connected:
                 # Reconnect player
                 player.connected = True
                 player.id = sid
+                player.reconnect_token = session_manager.rotate_reconnect_token(reconnect_record.session_id)
                 
                 # Update keys mapping
                 room.players[sid] = room.players.pop(pid)
@@ -74,15 +98,20 @@ async def room_join(sid, data):
                         room=room_code
                     )
                 
-                return {"status": "success", "room": room.model_dump()}
+                return {"status": "success", "room": room.model_dump(), "reconnectToken": player.reconnect_token}
         return {"status": "error", "message": "Cannot join a game already in progress"}
     
     # Normal join
+    client_session = await sio.get_session(sid)
+    session_id = client_session.get("session_id")
+    reconnect_token = session_manager.rotate_reconnect_token(session_id)
     room = room_manager.join_room(
         room_code=room_code,
         player_id=sid,
         player_name=player_name,
-        player_color=player_color
+        player_color=player_color,
+        session_id=session_id,
+        reconnect_token=reconnect_token,
     )
     
     if not room:
@@ -97,7 +126,7 @@ async def room_join(sid, data):
         room=room_code
     )
     
-    return {"status": "success", "room": room.model_dump()}
+    return {"status": "success", "room": room.model_dump(), "reconnectToken": reconnect_token}
 
 @sio.on('room:leave')
 async def room_leave(sid):
@@ -119,6 +148,8 @@ async def room_leave(sid):
 
 @sio.on('room:update_settings')
 async def room_update_settings(sid, data):
+    if not rate_limiter.allow(f"{sid}:room_update_settings"):
+        return {"status": "error", "message": "Too many requests"}
     """
     Expects data: {"settings": {"max_players": 4, "auction_enabled": false}}
     """
@@ -126,8 +157,11 @@ async def room_update_settings(sid, data):
     if not room_code:
         return {"status": "error", "message": "Not in a room"}
         
-    settings = data.get("settings", {})
-    updated_room = room_manager.update_settings(room_code, sid, settings)
+    try:
+        payload = RoomUpdateSettingsPayload.model_validate(data or {})
+    except ValidationError as exc:
+        return {"status": "error", "message": exc.errors()[0]["msg"]}
+    updated_room = room_manager.update_settings(room_code, sid, payload.settings.model_dump())
     
     if not updated_room:
         return {"status": "error", "message": "Failed to update settings. Must be host and room must be waiting."}

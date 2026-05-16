@@ -2,17 +2,31 @@ from sockets.server import sio
 from rooms.manager import room_manager
 import json
 import asyncio
+import os
+from services.session_manager import session_manager
 
 # Load socket events constants
-with open('../shared/events/socket_events.json', 'r') as f:
+events_path = os.path.join(os.path.dirname(__file__), '../../shared/events/socket_events.json')
+with open(events_path, 'r', encoding='utf-8') as f:
     SOCKET_EVENTS = json.load(f)
 
 CONNECTION_EVENTS = SOCKET_EVENTS["CONNECTION"]
 
 @sio.event
-async def connect(sid, environ):
+async def connect(sid, environ, auth):
     print(f"Client connected: {sid}")
-    # Connection logic (e.g. auth) can go here
+    auth = auth or {}
+    requested_name = auth.get("name", f"Player_{sid[:4]}")
+    signed_session_token = auth.get("sessionToken", "")
+    session = session_manager.resolve_session(signed_session_token, requested_name)
+    session.player_socket_id = sid
+    await sio.save_session(
+        sid,
+        {
+            "session_id": session.session_id,
+            "player_name": session.player_name,
+        },
+    )
 
 @sio.event
 async def disconnect(sid):

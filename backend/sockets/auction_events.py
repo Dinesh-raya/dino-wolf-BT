@@ -1,9 +1,12 @@
 import json
 import os
+from pydantic import ValidationError
 from sockets.server import sio
 from rooms.manager import room_manager
 from engine.turn_manager import turn_manager
 from engine.auction import auction_manager
+from schemas.contracts import PropertyActionPayload, AuctionBidPayload
+from services.rate_limiter import rate_limiter
 
 events_path = os.path.join(os.path.dirname(__file__), '../../shared/events/socket_events.json')
 with open(events_path, 'r') as f:
@@ -12,8 +15,11 @@ with open(events_path, 'r') as f:
 AUCTION_EVENTS = SOCKET_EVENTS["AUCTION"]
 GAME_EVENTS = SOCKET_EVENTS["GAME"]
 
-@sio.event
+@sio.on("auction:start")
+@sio.on("auction_start")
 async def auction_start(sid, data):
+    if not rate_limiter.allow(f"{sid}:auction_start"):
+        return {"status": "error", "message": "Too many requests"}
     room_code = room_manager.get_player_room_code(sid)
     if not room_code:
         return {"status": "error", "message": "Not in a room"}
@@ -24,7 +30,11 @@ async def auction_start(sid, data):
     if turn.active_player_id != sid or turn.phase != "buy":
         return {"status": "error", "message": "Cannot start auction now"}
         
-    property_id = data.get("property_id")
+    try:
+        payload = PropertyActionPayload.model_validate(data or {})
+    except ValidationError as exc:
+        return {"status": "error", "message": exc.errors()[0]["msg"]}
+    property_id = payload.property_id
     
     participants = [p for p in game.turn_order if not game.room.players[p].is_bankrupt]
     
@@ -47,13 +57,20 @@ async def auction_start(sid, data):
     )
     return {"status": "success"}
 
-@sio.event
+@sio.on("auction:bid")
+@sio.on("auction_bid")
 async def auction_bid(sid, data):
+    if not rate_limiter.allow(f"{sid}:auction_bid"):
+        return {"status": "error", "message": "Too many requests"}
     room_code = room_manager.get_player_room_code(sid)
     if not room_code:
         return {"status": "error", "message": "Not in a room"}
         
-    bid_amount = data.get("amount", 0)
+    try:
+        payload = AuctionBidPayload.model_validate(data or {})
+    except ValidationError as exc:
+        return {"status": "error", "message": exc.errors()[0]["msg"]}
+    bid_amount = payload.amount
     game = turn_manager.get_game(room_code)
     player = game.room.players.get(sid)
     
@@ -70,8 +87,11 @@ async def auction_bid(sid, data):
     )
     return {"status": "success"}
 
-@sio.event
+@sio.on("auction:end")
+@sio.on("auction_end")
 async def auction_end(sid, data):
+    if not rate_limiter.allow(f"{sid}:auction_end"):
+        return {"status": "error", "message": "Too many requests"}
     room_code = room_manager.get_player_room_code(sid)
     if not room_code:
         return {"status": "error", "message": "Not in a room"}
@@ -79,7 +99,12 @@ async def auction_end(sid, data):
     game = turn_manager.get_game(room_code)
     turn = turn_manager.get_turn_state(room_code)
     
-    # Ideally, server timer handles this. For now, allowing active player or host to trigger end.
+    room = room_manager.get_room(room_code)
+    if not room:
+        return {"status": "error", "message": "Room not found"}
+    if sid not in {room.host_id, turn.active_player_id}:
+        return {"status": "error", "message": "Not authorized to end auction"}
+
     success, msg = auction_manager.end_auction(room_code, game)
     if not success:
         return {"status": "error", "message": msg}

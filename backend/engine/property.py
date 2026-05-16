@@ -1,5 +1,6 @@
 from schemas.game import GameState
 from engine.game_initializer import load_board_config
+from constants.game_rules import GameRules
 
 _BOARD_CONFIG_CACHE = None
 
@@ -148,3 +149,186 @@ def unmortgage_property(game_state: GameState, player_id: str, property_id: int)
     
     game_state.history_log.append(f"{player.name} unmortgaged {config['name']} for ₹{unmortgage_cost}")
     return True, "Unmortgaged successfully"
+
+def can_build_house(game_state: GameState, player_id: str, property_id: int) -> tuple[bool, str]:
+    """Check if a player can build a house on a property."""
+    prop_state = game_state.properties.get(property_id)
+    if not prop_state or prop_state.owner_id != player_id:
+        return False, "You do not own this property"
+    
+    if prop_state.is_mortgaged:
+        return False, "Cannot build on mortgaged property"
+    
+    config = get_board_config().get(property_id)
+    if not config or config["type"] != "property":
+        return False, "Not a buildable property"
+    
+    # Check if player has monopoly on color group
+    color = config["color"]
+    color_group_ids = [k for k, v in get_board_config().items() if v.get("color") == color]
+    has_monopoly = all(game_state.properties[k].owner_id == player_id for k in color_group_ids)
+    if not has_monopoly:
+        return False, "You need monopoly on this color group to build"
+    
+    # Check house limit
+    if prop_state.houses >= GameRules.MAX_HOUSES_PER_PROPERTY:
+        return False, f"Maximum {GameRules.MAX_HOUSES_PER_PROPERTY} houses already built"
+    
+    # Check even building rule (cannot have more than 1 house difference between properties in same color group)
+    other_props_in_group = [game_state.properties[p_id] for p_id in color_group_ids if p_id != property_id]
+    current_houses = prop_state.houses
+    for other_prop in other_props_in_group:
+        if other_prop.houses < current_houses - GameRules.MAX_HOUSE_DIFFERENCE:
+            return False, "Must build evenly across properties in color group"
+    
+    # Check if player has enough money
+    house_price = GameRules.HOUSE_PRICES.get(color, 0)
+    if house_price == 0:
+        return False, "Invalid color group for building"
+    
+    player = game_state.room.players[player_id]
+    if player.money < house_price:
+        return False, "Not enough money"
+    
+    return True, "Can build house"
+
+def build_house(game_state: GameState, player_id: str, property_id: int) -> tuple[bool, str]:
+    """Build a house on a property."""
+    can_build, message = can_build_house(game_state, player_id, property_id)
+    if not can_build:
+        return False, message
+    
+    config = get_board_config().get(property_id)
+    color = config["color"]
+    house_price = GameRules.HOUSE_PRICES.get(color, 0)
+    
+    player = game_state.room.players[player_id]
+    prop_state = game_state.properties[property_id]
+    
+    # Deduct money and add house
+    player.money -= house_price
+    prop_state.houses += 1
+    
+    game_state.history_log.append(f"{player.name} built a house on {config['name']} for ₹{house_price}")
+    return True, "House built successfully"
+
+def can_build_hotel(game_state: GameState, player_id: str, property_id: int) -> tuple[bool, str]:
+    """Check if a player can build a hotel on a property."""
+    prop_state = game_state.properties.get(property_id)
+    if not prop_state or prop_state.owner_id != player_id:
+        return False, "You do not own this property"
+    
+    if prop_state.is_mortgaged:
+        return False, "Cannot build on mortgaged property"
+    
+    config = get_board_config().get(property_id)
+    if not config or config["type"] != "property":
+        return False, "Not a buildable property"
+    
+    # Check if player has monopoly on color group
+    color = config["color"]
+    color_group_ids = [k for k, v in get_board_config().items() if v.get("color") == color]
+    has_monopoly = all(game_state.properties[k].owner_id == player_id for k in color_group_ids)
+    if not has_monopoly:
+        return False, "You need monopoly on this color group to build"
+    
+    # Check hotel limit
+    if prop_state.hotels >= GameRules.MAX_HOTELS_PER_PROPERTY:
+        return False, "Maximum 1 hotel already built"
+    
+    # Check if property has 4 houses
+    if prop_state.houses < GameRules.HOUSES_BEFORE_HOTEL:
+        return False, f"Need {GameRules.HOUSES_BEFORE_HOTEL} houses before building hotel"
+    
+    # Check even building rule for hotels (all properties in group must have at least 3 houses)
+    other_props_in_group = [game_state.properties[p_id] for p_id in color_group_ids if p_id != property_id]
+    for other_prop in other_props_in_group:
+        if other_prop.houses < 3:
+            return False, "All properties in color group must have at least 3 houses before building hotel"
+    
+    # Check if player has enough money
+    house_price = GameRules.HOUSE_PRICES.get(color, 0)
+    hotel_price = house_price * GameRules.HOTEL_PRICE_MULTIPLIER
+    
+    player = game_state.room.players[player_id]
+    if player.money < hotel_price:
+        return False, "Not enough money"
+    
+    return True, "Can build hotel"
+
+def build_hotel(game_state: GameState, player_id: str, property_id: int) -> tuple[bool, str]:
+    """Build a hotel on a property (replaces 4 houses)."""
+    can_build, message = can_build_hotel(game_state, player_id, property_id)
+    if not can_build:
+        return False, message
+    
+    config = get_board_config().get(property_id)
+    color = config["color"]
+    house_price = GameRules.HOUSE_PRICES.get(color, 0)
+    hotel_price = house_price * GameRules.HOTEL_PRICE_MULTIPLIER
+    
+    player = game_state.room.players[player_id]
+    prop_state = game_state.properties[property_id]
+    
+    # Deduct money, remove 4 houses, add hotel
+    player.money -= hotel_price
+    prop_state.houses = 0
+    prop_state.hotels = 1
+    
+    game_state.history_log.append(f"{player.name} built a hotel on {config['name']} for ₹{hotel_price} (replaced 4 houses)")
+    return True, "Hotel built successfully"
+
+def sell_house(game_state: GameState, player_id: str, property_id: int) -> tuple[bool, str]:
+    """Sell a house from a property (half price)."""
+    prop_state = game_state.properties.get(property_id)
+    if not prop_state or prop_state.owner_id != player_id:
+        return False, "You do not own this property"
+    
+    if prop_state.houses == 0:
+        return False, "No houses to sell"
+    
+    if prop_state.hotels > 0:
+        return False, "Must sell hotel first"
+    
+    config = get_board_config().get(property_id)
+    color = config["color"]
+    house_price = GameRules.HOUSE_PRICES.get(color, 0)
+    sell_price = house_price // 2  # Half price when selling back
+    
+    # Check even building rule (cannot create >1 house difference)
+    color_group_ids = [k for k, v in get_board_config().items() if v.get("color") == color]
+    other_props_in_group = [game_state.properties[p_id] for p_id in color_group_ids if p_id != property_id]
+    current_houses = prop_state.houses
+    for other_prop in other_props_in_group:
+        if other_prop.houses > current_houses + GameRules.MAX_HOUSE_DIFFERENCE:
+            return False, "Cannot sell house - would create uneven development"
+    
+    player = game_state.room.players[player_id]
+    prop_state.houses -= 1
+    player.money += sell_price
+    
+    game_state.history_log.append(f"{player.name} sold a house on {config['name']} for ₹{sell_price}")
+    return True, "House sold successfully"
+
+def sell_hotel(game_state: GameState, player_id: str, property_id: int) -> tuple[bool, str]:
+    """Sell a hotel (half price, returns to 4 houses)."""
+    prop_state = game_state.properties.get(property_id)
+    if not prop_state or prop_state.owner_id != player_id:
+        return False, "You do not own this property"
+    
+    if prop_state.hotels == 0:
+        return False, "No hotel to sell"
+    
+    config = get_board_config().get(property_id)
+    color = config["color"]
+    house_price = GameRules.HOUSE_PRICES.get(color, 0)
+    hotel_price = house_price * GameRules.HOTEL_PRICE_MULTIPLIER
+    sell_price = hotel_price // 2  # Half price when selling back
+    
+    player = game_state.room.players[player_id]
+    prop_state.hotels = 0
+    prop_state.houses = 4  # Return to 4 houses
+    player.money += sell_price
+    
+    game_state.history_log.append(f"{player.name} sold hotel on {config['name']} for ₹{sell_price} (returned to 4 houses)")
+    return True, "Hotel sold successfully"

@@ -22,7 +22,8 @@ def init_game_state(room: RoomState) -> GameState:
             
     # Randomize turn order
     player_ids = list(room.players.keys())
-    random.shuffle(player_ids)
+    if room.settings.random_turn_order:
+        random.shuffle(player_ids)
     
     # Set initial money from room settings
     for pid in player_ids:

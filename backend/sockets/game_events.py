@@ -4,6 +4,7 @@ from sockets.server import sio
 from rooms.manager import room_manager
 from engine.game_initializer import init_game_state
 from engine.turn_manager import turn_manager
+from services.rate_limiter import rate_limiter
 
 # Load socket events constants
 events_path = os.path.join(os.path.dirname(__file__), '../../shared/events/socket_events.json')
@@ -13,8 +14,11 @@ with open(events_path, 'r') as f:
 GAME_EVENTS = SOCKET_EVENTS["GAME"]
 ROOM_EVENTS = SOCKET_EVENTS["ROOM"]
 
-@sio.event
+@sio.on("game:start")
+@sio.on("game_start")
 async def game_start(sid, data):
+    if not rate_limiter.allow(f"{sid}:game_start"):
+        return {"status": "error", "message": "Too many requests"}
     room_code = room_manager.get_player_room_code(sid)
     if not room_code:
         return {"status": "error", "message": "Not in a room"}
@@ -42,8 +46,11 @@ async def game_start(sid, data):
     )
     return {"status": "success"}
 
-@sio.event
+@sio.on("game:dice_roll")
+@sio.on("game_dice_roll")
 async def game_dice_roll(sid, data):
+    if not rate_limiter.allow(f"{sid}:game_dice_roll"):
+        return {"status": "error", "message": "Too many requests"}
     room_code = room_manager.get_player_room_code(sid)
     if not room_code:
         return {"status": "error", "message": "Not in a room"}
@@ -67,8 +74,11 @@ async def game_dice_roll(sid, data):
     
     return {"status": "success"}
 
-@sio.event
+@sio.on("game:end_turn")
+@sio.on("game_end_turn")
 async def game_end_turn(sid, data):
+    if not rate_limiter.allow(f"{sid}:game_end_turn"):
+        return {"status": "error", "message": "Too many requests"}
     room_code = room_manager.get_player_room_code(sid)
     if not room_code:
         return {"status": "error", "message": "Not in a room"}

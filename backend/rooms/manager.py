@@ -10,7 +10,7 @@ class RoomManager:
         # Map socket_id to room_id for O(1) lookups on disconnect
         self.player_rooms: Dict[str, str] = {}
 
-    def create_room(self, host_id: str, host_name: str, host_color: str) -> str:
+    def create_room(self, host_id: str, host_name: str, host_color: str, session_id: str, reconnect_token: str, is_private: bool = False) -> str:
         """Creates a new room and returns its code."""
         room_code = generate_room_code()
         while room_code in self.rooms:
@@ -19,19 +19,22 @@ class RoomManager:
         host_player = PlayerState(
             id=host_id,
             name=host_name,
-            color=host_color
+            color=host_color,
+            session_id=session_id,
+            reconnect_token=reconnect_token,
         )
         
         new_room = RoomState(
             room_id=room_code,
             host_id=host_id,
+            is_private=is_private,
             players={host_id: host_player}
         )
         self.rooms[room_code] = new_room
         self.player_rooms[host_id] = room_code
         return room_code
 
-    def join_room(self, room_code: str, player_id: str, player_name: str, player_color: str) -> Optional[RoomState]:
+    def join_room(self, room_code: str, player_id: str, player_name: str, player_color: str, session_id: str, reconnect_token: str) -> Optional[RoomState]:
         """Adds a player to a room. Returns the RoomState if successful, None otherwise."""
         room = self.rooms.get(room_code)
         if not room:
@@ -50,7 +53,9 @@ class RoomManager:
         new_player = PlayerState(
             id=player_id,
             name=player_name,
-            color=player_color
+            color=player_color,
+            session_id=session_id,
+            reconnect_token=reconnect_token,
         )
         room.players[player_id] = new_player
         self.player_rooms[player_id] = room_code
@@ -95,10 +100,7 @@ class RoomManager:
         if not room or room.host_id != host_id or room.status != "waiting":
             return None
             
-        for key, value in new_settings.items():
-            if hasattr(room.settings, key):
-                setattr(room.settings, key, value)
-                
+        room.settings = RoomSettings.model_validate(new_settings)
         return room
 
 # Global instance for Phase 2

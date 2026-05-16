@@ -79,4 +79,11 @@ class AuctionManager:
             game_state.history_log.append(f"No one bid on {config['name']}")
             return True, "Auction ended with no bids"
 
+    def tick(self, room_code: str) -> Optional[AuctionState]:
+        auction = self.auctions.get(room_code)
+        if not auction or not auction.active:
+            return None
+        auction.time_remaining = max(0, auction.time_remaining - 1)
+        return auction
+
 auction_manager = AuctionManager()

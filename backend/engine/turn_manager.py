@@ -147,4 +147,20 @@ class TurnManager:
         
         return {"dice": dice.model_dump(), "game": game, "turn": turn}
 
+    def tick_turn_timer(self, room_code: str) -> Optional[TurnState]:
+        turn = self.turn_states.get(room_code)
+        game = self.games.get(room_code)
+        if not turn or not game:
+            return None
+        turn.time_remaining = max(0, turn.time_remaining - 1)
+        if turn.time_remaining == 0:
+            active = game.room.players.get(turn.active_player_id)
+            if active and turn.can_roll:
+                self.process_roll(room_code, turn.active_player_id)
+                turn = self.turn_states.get(room_code)
+            if turn and not turn.can_roll:
+                self.next_turn(room_code)
+                turn = self.turn_states.get(room_code)
+        return turn
+
 turn_manager = TurnManager()
